@@ -1,0 +1,149 @@
+function [ds,db,tau,f,U0,shields,sleath] = sass(T_,U_,UT_,H_,Px_,B_,d50_,w_,beta_,ds0,calib,mute);
+% function [ds,db,tau,f,U0,shields,sleath]
+%     = sass(T_,U_,UT_,H_,Px_,B_,d50_,w_,sinB_,ds0,calib);
+%% SEMI-ANALYTICAL MODEL FOR SHEAR STRESS AND SHEET FLOW THICKNESS
+% Thijs Lanckriet
+% University of Delaware, 2014
+%
+%% INPUT PARAMETERS
+%   T: Time vector (in seconds)
+%   U: Velocity timeseries(in m/s);
+%   UT: Time derivative of velocity timeseries (in m/s2)
+%   Px: Pressure gradient time series
+%   d50: Median grain diameter
+%   w: Sediment fall velocity
+%   sinB: Bottom slope
+%   h: height of the water column
+%   Calib: 4x1 matrix of calibration values
+%
+%% OUTPUT PARAMETERS
+%   delta: Boundary layer thickness (in m)
+%   tau: Bed shear stress
+%   f: Friction factor
+%   ds: sheet flow layer thickness
+%   ds_steady: Steady-state sheet flow layer thickness
+%   ds_steady_nopress: Steady-state sheet flow layer thickness (no pressure gradient)
+
+%Share variables with sub-functions
+global  T U UT H B Px kappa rhos rho g c0 tanphip d50 sinB cosB C1 C2 C3 C4 w hcut signU
+
+% Put input variables into the global workspace to share with sub-variables
+T = T_;
+U = U_;
+UT = UT_;
+H = H_;
+Px = Px_;
+B = B_;
+d50 = d50_;
+w = w_;
+sinB = sin(beta);       %So that we only have to calculate this once
+cosB = cos(beta);       %So that we only have to calculate this once
+% Calibration vector
+C1 = calib(1);          %Calibration factor for grain inertia
+C2 = calib(2);          %Calibration factor for weight in sediment layer
+C3 = calib(3);          %Calibration factor Mobile Bottom roughness
+C4 = calib(4);          %Calibration factor for bore term
+
+
+%% Initial conditions
+%Physical variables
+kappa = 0.41;           %Von Karman constant
+rho = 1000;             %Density of water
+rhos = 2650;            %Density of sediment
+g=9.81;                 %Gravitational acceleration
+c0 = 0.6;               %Sediment bed concentration
+tanphip = 0.32;         %Tangent of dynamic friction angle
+hcut = d50;             %Cut-off for small water depth
+
+%% Extend input time series to avoid interpolation problems toward the end of the time series
+T = [T T(end)+100];
+U = [U U(end)];
+UT= [UT UT(end)];
+Px= [Px Px(end)];
+H = [H H(end)];
+B = [B B(end)];
+
+Kn0 = 2.50 * d50;%Nikuradze roughness
+z00 = Kn0/30;   %Initial z0
+%% Initialize solution variables
+db0 = d50/100; %Initial boundary layer thickness
+Z0 = log((db0+z00)/z00); % Initial Z for momentum integral theory
+Y0 = ds0/d50;
+
+X0 = [Z0 Y0]'; %Initial condition vector
+
+Tsol = [T(1)];          %Solution time vector
+X = X0;                 %Solution vector
+
+signU = sign(U(find(U~=0,1)));
+
+%% Solve ODE set
+dtzero = 1e-9; %Initial time step
+
+if ~mute;
+    tic;
+end
+
+solveropts = odeset('maxstep',0.05,'events',@BLevents);
+
+while Tsol(end) < T(end);
+    
+    if Tsol(end)>0;
+        signU = sign(FU(Tsol(end)));
+    end
+    
+    if ~mute;
+        printf('%3.2f; %i',Tsol(end));
+    end
+    
+    sol = ode15s(@FX,[Tsol(end) T(end)],X(:,end),solveropts);
+    
+    %Append solution vectors with new section
+    Tsol = [Tsol sol.x];
+    X = [X sol.y];
+    
+    %Reset boundary layer thickness
+    Tsol = [Tsol Tsol(end)];
+    Xnext = [Z0 X2(end)]';
+    X = [X Xnext];
+end
+if ~mute;
+    fprintf('\n');
+end
+%% Get derived quantities
+Z =X(1,:);
+ds = X(2,:)*d50;
+
+%Interpolate to original time vector
+[~,ia]=unique(Tsol);
+if strcmp(version,'7.11.0.584 (R2010b)');
+    [~,ib]=unique(Tsol,'last');
+else
+    [~,ib]=unique(Tsol,'last','legacy');
+end
+
+Z = interp1(Tsol(ia),mean([Z(ia);Z(ib)]),T,'linear');
+ds = interp1(Tsol(ia),mean([ds(ia);ds(ib)]),T,'linear');
+
+Kn = 2.50 * d50 + 0.50 * C3 * ds;%Nikuradze roughness
+
+z0 = Kn/30;
+
+db = z0 .* (exp(Z)-1);      %Boundary layer thickness
+
+U0 = nan(size(U));          %Free stream velocity
+for i = 1:length(U0);
+    U0(i) = FU2(T(i),delta(i),z0(i));
+end
+
+Uf = U0./Z*kappa;           %Friction velocity
+Uf(FHmat(T)<hcut)=0;        %Set friction velocity to 0 when no flow
+
+% Px2 = FP(Tsol);
+tau = rho*Uf.^2.*sign(U);   %Bed shear stress
+f = 2 * Uf.^2 ./ U0.^2;     %Friction factor
+
+shields = abs(tau/((rhos-rho)*g*d50)); %Shields number
+sleath = -Px /((rhos-rho)*g);          %Sleath  number
+
+end
